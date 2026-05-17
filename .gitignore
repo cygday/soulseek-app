@@ -1,0 +1,4 @@
+backend/venv/
+backend/uploads
+frontend/node_modules
+frontend/dist
