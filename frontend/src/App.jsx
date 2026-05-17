@@ -4,7 +4,7 @@ import Peer from 'simple-peer';
 import { MessageSquare, Video, File, Send, LogIn, Users, PhoneOff } from 'lucide-react';
 
 // Change this URL to your production Render URL when deploying!
-const socket = io('https://souldseek-render.com', { autoConnect: false });
+const socket = io('https://soulseek-app.onrender.com', { autoConnect: false });
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
