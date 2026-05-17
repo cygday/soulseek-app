@@ -4,8 +4,35 @@ import Peer from 'simple-peer';
 import { MessageSquare, Video, File, Send, LogIn, Users, PhoneOff, Menu } from 'lucide-react';
 
 // REPLACE THIS URL WITH YOUR LIVE RENDER BACKEND URL FOR PRODUCTION
-const BACKEND_URL = "https://soulseek-app.onrender.com"; 
+const BACKEND_URL = "https://your-backend-url.onrender.com"; 
 const socket = io(BACKEND_URL, { autoConnect: false });
+
+// Helper Component to handle independent stream assignments safely in React
+function RemoteVideo({ peerObj }) {
+  const videoRef = useRef();
+
+  useEffect(() => {
+    peerObj.peer.on('stream', (remoteStream) => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = remoteStream;
+      }
+    });
+  }, [peerObj]);
+
+  return (
+    <div style={{ position: 'relative', width: '120px', height: '90px', flexShrink: 0 }}>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        style={{ width: '120px', height: '90px', backgroundColor: 'black', borderRadius: '8px', objectFit: 'cover' }}
+      />
+      <span style={{ position: 'absolute', bottom: '4px', left: '4px', backgroundColor: 'rgba(0,0,0,0.6)', padding: '2px 4px', borderRadius: '4px', fontSize: '10px' }}>
+        {peerObj.username || "User"}
+      </span>
+    </div>
+  );
+}
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -15,13 +42,14 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   
-  // Video States
+  // Video Calling & Dynamic Peers Array State
   const [inVideoCall, setInVideoCall] = useState(false);
   const [stream, setStream] = useState(null);
-  const peersRef = useRef([]); 
+  const [peers, setPeers] = useState([]); 
   
+  const peersRef = useRef([]); // Internal tracking array
   const myVideoRef = useRef();
-  const remoteVideoContainerRef = useRef();
+  const messagesEndRef = useRef(null);
 
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -35,17 +63,19 @@ export default function App() {
 
     socket.on('user-joined', ({ sid, username: joinedUser }) => {
       if (stream) {
-        initiateCall(sid, stream);
+        initiateCall(sid, joinedUser, stream);
       }
     });
 
-    socket.on('signal', ({ sender, signal }) => {
-      const peer = peersRef.current.find(p => p.peerID === sender);
-      if (peer) {
-        peer.peer.signal(signal);
+    socket.on('signal', ({ sender, username: senderName, signal }) => {
+      const peerMatch = peersRef.current.find(p => p.peerID === sender);
+      if (peerMatch) {
+        peerMatch.peer.signal(signal);
       } else if (stream) {
         const incomingPeer = acceptCall(sender, signal, stream);
-        peersRef.current.push({ peerID: sender, peer: incomingPeer });
+        const newPeerObj = { peerID: sender, username: senderName, peer: incomingPeer };
+        peersRef.current.push(newPeerObj);
+        setPeers(prev => [...prev, newPeerObj]);
       }
     });
 
@@ -62,7 +92,10 @@ export default function App() {
     };
   }, [isLoggedIn, room, stream]);
 
-  // Handle setting stream to video element safely across devices
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
   useEffect(() => {
     if (stream && myVideoRef.current) {
       myVideoRef.current.srcObject = stream;
@@ -98,7 +131,6 @@ export default function App() {
     }
   };
 
-  // Fixed WebRTC Stream handling for Mobile Browsers
   const startVideo = async () => {
     try {
       const constraints = {
@@ -109,7 +141,7 @@ export default function App() {
       setStream(localStream);
       setInVideoCall(true);
     } catch (err) {
-      alert("Could not access camera. Please ensure permissions are granted and you are on HTTPS.");
+      alert("Could not access camera. Please make sure you are running on an HTTPS connection or localhost.");
       console.error(err);
     }
   };
@@ -120,63 +152,44 @@ export default function App() {
     }
     peersRef.current.forEach(p => p.peer.destroy());
     peersRef.current = [];
-
-    if (remoteVideoContainerRef.current) {
-      remoteVideoContainerRef.current.innerHTML = '';
-    }
+    setPeers([]);
 
     setStream(null);
     setInVideoCall(false);
     socket.emit('signal', { room, signal: 'disconnect' }); 
   };
 
-  const initiateCall = (targetSid, localStream) => {
+  const initiateCall = (targetSid, targetUsername, localStream) => {
     const peer = new Peer({ initiator: true, trickle: false, stream: localStream });
+    
     peer.on('signal', (signal) => {
-      socket.emit('signal', { target: targetSid, signal });
+      socket.emit('signal', { target: targetSid, username, signal });
     });
-    peer.on('stream', (remoteStream) => {
-      addRemoteVideo(targetSid, remoteStream);
-    });
-    peersRef.current.push({ peerID: targetSid, peer });
+
+    const peerObj = { peerID: targetSid, username: targetUsername, peer };
+    peersRef.current.push(peerObj);
+    setPeers(prev => [...prev, peerObj]);
   };
 
   const acceptCall = (senderSid, incomingSignal, localStream) => {
     const peer = new Peer({ initiator: false, trickle: false, stream: localStream });
+    
     peer.on('signal', (signal) => {
-      socket.emit('signal', { target: senderSid, signal });
+      socket.emit('signal', { target: senderSid, username, signal });
     });
-    peer.on('stream', (remoteStream) => {
-      addRemoteVideo(senderSid, remoteStream);
-    });
+
     peer.signal(incomingSignal);
     return peer;
   };
 
-  const addRemoteVideo = (sid, remoteStream) => {
-    if (document.getElementById(sid)) return;
-    const video = document.createElement('video');
-    video.id = sid;
-    video.srcObject = remoteStream;
-    video.autoplay = true;
-    video.playsInline = true; // Crucial for iOS/Android rendering
-    video.style.width = "140px";
-    video.style.height = "105px";
-    video.style.backgroundColor = "black";
-    video.style.borderRadius = "8px";
-    video.style.objectFit = "cover";
-    remoteVideoContainerRef.current?.appendChild(video);
-  };
-
   const removeRemoteVideo = (sid) => {
-    const videoElement = document.getElementById(sid);
-    if (videoElement) videoElement.remove();
     peersRef.current = peersRef.current.filter(p => p.peerID !== sid);
+    setPeers(prev => prev.filter(p => p.peerID !== sid));
   };
 
   if (!isLoggedIn) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', backgroundColor: '#0f172a', color: 'white', fontFamily: 'sans-serif', padding: '16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', height: '100svh', backgroundColor: '#0f172a', color: 'white', fontFamily: 'sans-serif', padding: '16px', boxSizing: 'border-box' }}>
         <form onSubmit={handleLogin} style={{ backgroundColor: '#1e293b', padding: '24px', borderRadius: '12px', width: '100%', maxWidth: '340px', boxSizing: 'border-box' }}>
           <h2 style={{ fontSize: '22px', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'center' }}><MessageSquare /> SoulSeek Rooms</h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -196,9 +209,13 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', height: '100vh', backgroundColor: '#020617', color: '#f8fafc', fontFamily: 'sans-serif', overflow: 'hidden', position: 'relative' }}>
+    <div style={{ display: 'flex', height: '100vh', height: '100svh', backgroundColor: '#020617', color: '#f8fafc', fontFamily: 'sans-serif', overflow: 'hidden', position: 'relative' }}>
       
-      {/* Sidebar (Responsive Overlay for Mobile, static for Desktop) */}
+      {/* Sidebar Navigation */}
+      {sidebarOpen && (
+        <div onClick={() => setSidebarOpen(false)} style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 40 }} />
+      )}
+      
       <div style={{
         width: '240px', 
         backgroundColor: '#0f172a', 
@@ -209,30 +226,30 @@ export default function App() {
         position: 'absolute',
         top: 0, bottom: 0, left: sidebarOpen ? 0 : '-240px',
         zIndex: 50,
-        transition: 'left 0.3s ease',
-        mdPosition: 'static', // Logic handled via standard window layouts fallback
-      }} className="sidebar-element">
+        transition: 'left 0.25s ease-out',
+        boxSizing: 'border-box'
+      }}>
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          <h3 style={{ color: '#818cf8', margin: '0 0 20px 0', display: 'flex', justifyContent: 'between', alignItems: 'center' }}>
-            <span>🕹️ SoulSeek V2</span>
-            <button onClick={() => setSidebarOpen(false)} style={{ background: 'none', border: 'none', color: 'white', fontSize: '16px', cursor: 'pointer' }} className="mobile-only-btn">✕</button>
-          </h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+            <h3 style={{ color: '#818cf8', margin: 0 }}>🕹️ SoulSeek V2</h3>
+            <button onClick={() => setSidebarOpen(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '18px', cursor: 'pointer' }}>✕</button>
+          </div>
           <p style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', fontWeight: 'bold', margin: '0 0 8px 0' }}>Channels</p>
           <div style={{ padding: '10px', backgroundColor: '#1e293b', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px' }}><Users size={14}/> #{room}</div>
           <div style={{ fontSize: '13px', padding: '10px', backgroundColor: '#020617', borderRadius: '6px', marginTop: 'auto' }}>User: <b>{username}</b></div>
         </div>
       </div>
 
-      {/* Main Chat Workspace */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', width: '100%', overflow: 'hidden' }}>
+      {/* Main App Workspace */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', width: '100%', height: '100%', overflow: 'hidden', position: 'relative' }}>
         
-        {/* Navigation Bar */}
-        <div style={{ height: '60px', backgroundColor: '#0f172a', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
+        {/* Upper Top Navbar Header */}
+        <div style={{ height: '60px', backgroundColor: '#0f172a', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{ background: 'none', border: 'none', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+            <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{ background: 'none', border: 'none', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}>
               <Menu size={22} />
             </button>
-            <div style={{ fontWeight: 'bold', fontSize: '15px' }}>#{room}</div>
+            <div style={{ fontWeight: 'bold', fontSize: '15px' }}>#{room} Lounge</div>
           </div>
           
           {!inVideoCall ? (
@@ -246,24 +263,29 @@ export default function App() {
           )}
         </div>
 
-        {/* Video Feeds Panel (Scrolls horizontally if multiple) */}
+        {/* Dynamic Horizontal Video Dock */}
         {inVideoCall && (
-          <div style={{ backgroundColor: '#0f172a', padding: '12px', display: 'flex', gap: '12px', overflowX: 'auto', borderBottom: '1px solid #1e293b', alignItems: 'center' }}>
-            <div style={{ position: 'relative', width: '140px', height: '105px', flexShrink: 0 }}>
+          <div style={{ backgroundColor: '#0f172a', padding: '10px', display: 'flex', gap: '12px', overflowX: 'auto', borderBottom: '1px solid #1e293b', alignItems: 'center', flexShrink: 0 }}>
+            {/* Local Stream (Your video) */}
+            <div style={{ position: 'relative', width: '120px', height: '90px', flexShrink: 0 }}>
               <video 
                 ref={myVideoRef} 
                 autoPlay 
                 muted 
                 playsInline 
-                style={{ width: '140px', height: '105px', backgroundColor: 'black', borderRadius: '8px', transform: 'scaleX(-1)', objectFit: 'cover' }} 
+                style={{ width: '120px', height: '90px', backgroundColor: 'black', borderRadius: '8px', transform: 'scaleX(-1)', objectFit: 'cover' }} 
               />
               <span style={{ position: 'absolute', bottom: '4px', left: '4px', backgroundColor: 'rgba(0,0,0,0.6)', padding: '2px 4px', borderRadius: '4px', fontSize: '10px' }}>You</span>
             </div>
-            <div ref={remoteVideoContainerRef} style={{ display: 'flex', gap: '12px' }} />
+            
+            {/* Remote Streams (Other users' video feeds grid list) */}
+            {peers.map((peerObj) => (
+              <RemoteVideo key={peerObj.peerID} peerObj={peerObj} />
+            ))}
           </div>
         )}
 
-        {/* Message Feed */}
+        {/* Main Scrolling Text Message Feed */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px', backgroundColor: '#020617' }}>
           {messages.map((msg, idx) => (
             <div key={idx} style={{ alignSelf: msg.user === 'System' ? 'center' : 'flex-start', opacity: msg.user === 'System' ? 0.6 : 1, width: msg.user === 'System' ? 'auto' : '100%', maxWidth: '85%' }}>
@@ -280,17 +302,18 @@ export default function App() {
               </div>
             </div>
           ))}
+          <div ref={messagesEndRef} />
         </div>
 
-        {/* Action Dock */}
-        <div style={{ padding: '12px', backgroundColor: '#0f172a', borderTop: '1px solid #1e293b' }}>
-          <form onSubmit={sendMessage} style={{ display: 'flex', gap: '8px' }}>
-            <label style={{ cursor: 'pointer', padding: '10px', backgroundColor: '#1e293b', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        {/* Bottom Input Terminal Area Dock */}
+        <div style={{ padding: '12px', backgroundColor: '#0f172a', borderTop: '1px solid #1e293b', flexShrink: 0 }}>
+          <form onSubmit={sendMessage} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <label style={{ cursor: 'pointer', padding: '10px', backgroundColor: '#1e293b', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
               <File size={16} style={{ color: '#94a3b8' }} />
               <input type="file" style={{ display: 'none' }} onChange={handleFileUpload} />
             </label>
-            <input type="text" placeholder="Type a message..." style={{ flex: 1, backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '6px', padding: '0 12px', color: 'white', fontSize: '13px', boxSizing: 'border-box' }} value={message} onChange={e => setMessage(e.target.value)} />
-            <button type="submit" style={{ backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '0 14px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Send size={14} /></button>
+            <input type="text" placeholder="Type a message..." style={{ flex: 1, minWidth: 0, backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '6px', padding: '10px 12px', color: 'white', fontSize: '14px', boxSizing: 'border-box' }} value={message} onChange={e => setMessage(e.target.value)} />
+            <button type="submit" style={{ height: '38px', backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '0 14px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><Send size={14} /></button>
           </form>
         </div>
 
