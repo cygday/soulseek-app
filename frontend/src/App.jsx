@@ -4,7 +4,7 @@ import Peer from 'simple-peer';
 import { MessageSquare, Video, File, Send, LogIn, Users, PhoneOff, Menu } from 'lucide-react';
 
 // REPLACE THIS URL WITH YOUR LIVE RENDER BACKEND URL FOR PRODUCTION
-const BACKEND_URL = "https://your-backend-url.onrender.com"; 
+const BACKEND_URL = " https://soulseek-app.onrender.com"; 
 const socket = io(BACKEND_URL, { autoConnect: false });
 
 // Helper Component to handle independent stream assignments safely in React
