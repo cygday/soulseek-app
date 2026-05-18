@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import io from 'socket.io-client';
 import Peer from 'simple-peer';
 import { MessageSquare, Video, File, Send, Users, PhoneOff, Menu } from 'lucide-react';
@@ -42,12 +42,47 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   
   const [inVideoCall, setInVideoCall] = useState(false);
+  const [isWatching, setIsWatching] = useState(false);
+  const [roomUsers, setRoomUsers] = useState([]);
   const [stream, setStream] = useState(null);
   const [peers, setPeers] = useState([]); 
   
   const peersRef = useRef([]); 
   const myVideoRef = useRef();
   const messagesEndRef = useRef(null);
+
+  const initiateCall = useCallback((targetSid, targetUsername, localStream) => {
+    if (peersRef.current.find(p => p.peerID === targetSid)) {
+      return;
+    }
+    const peer = new Peer({ initiator: true, trickle: false, stream: localStream || undefined });
+    peer.on('signal', (signal) => {
+      socket.emit('signal', { target: targetSid, username, signal });
+    });
+    peer.on('connect', () => {
+      console.log(`WebRTC connected to ${targetUsername}`);
+    });
+    const peerObj = { peerID: targetSid, username: targetUsername, peer };
+    peersRef.current.push(peerObj);
+    setPeers(prev => [...prev, peerObj]);
+  }, [username]);
+
+  const acceptCall = useCallback((senderSid, incomingSignal, localStream) => {
+    if (peersRef.current.find(p => p.peerID === senderSid)) {
+      return peersRef.current.find(p => p.peerID === senderSid).peer;
+    }
+    const peer = new Peer({ initiator: false, trickle: false, stream: localStream || undefined });
+    peer.on('signal', (signal) => {
+      socket.emit('signal', { target: senderSid, username, signal });
+    });
+    peer.signal(incomingSignal);
+    return peer;
+  }, [username]);
+
+  const removeRemoteVideo = (sid) => {
+    peersRef.current = peersRef.current.filter(p => p.peerID !== sid);
+    setPeers(prev => prev.filter(p => p.peerID !== sid));
+  };
 
   // Core Networking Event Listeners
   useEffect(() => {
@@ -61,8 +96,39 @@ export default function App() {
     // WebRTC: Another user joined and is ready to establish a video connection
     socket.on('user-joined', ({ sid, username: joinedUser }) => {
       console.log(`Signaling target spotted: ${joinedUser} (${sid})`);
-      if (stream) {
+      if (stream || isWatching) {
         initiateCall(sid, joinedUser, stream);
+      }
+    });
+
+    // New user list for the room, including stream activity
+    socket.on('room-users', ({ users: roomUsers }) => {
+      setRoomUsers(roomUsers || []);
+      if (!roomUsers || roomUsers.length === 0) return;
+
+      const activeStreamers = roomUsers.filter(u => u.streaming);
+      activeStreamers.forEach(u => {
+        if (!peersRef.current.find(p => p.peerID === u.sid)) {
+          initiateCall(u.sid, u.username, stream);
+        }
+      });
+    });
+
+    socket.on('stream-status', ({ sid, username: streamerName, streaming }) => {
+      setRoomUsers((prev) => {
+        const next = prev.map((user) => user.sid === sid ? { ...user, streaming } : user);
+        if (!prev.find((user) => user.sid === sid)) {
+          next.push({ sid, username: streamerName, streaming });
+        }
+        return next;
+      });
+
+      if (streaming) {
+        if (!peersRef.current.find(p => p.peerID === sid)) {
+          initiateCall(sid, streamerName, stream);
+        }
+      } else {
+        removeRemoteVideo(sid);
       }
     });
 
@@ -71,7 +137,7 @@ export default function App() {
       const peerMatch = peersRef.current.find(p => p.peerID === sender);
       if (peerMatch) {
         peerMatch.peer.signal(signal);
-      } else if (stream) {
+      } else {
         const incomingPeer = acceptCall(sender, signal, stream);
         const newPeerObj = { peerID: sender, username: senderName, peer: incomingPeer };
         peersRef.current.push(newPeerObj);
@@ -86,10 +152,12 @@ export default function App() {
     return () => {
       socket.off('message');
       socket.off('user-joined');
+      socket.off('room-users');
+      socket.off('stream-status');
       socket.off('signal');
       socket.off('user-left');
     };
-  }, [isLoggedIn, stream]);
+  }, [isLoggedIn, stream, isWatching, initiateCall, acceptCall]);
 
   // Handle local video element layout mapping
   useEffect(() => {
@@ -111,6 +179,7 @@ export default function App() {
       socket.io.opts.extraHeaders = {}; 
       socket.connect(); // Force immediate engine connection
       socket.emit('join', { username, room });
+      socket.emit('get-room-users', { room });
     }
   };
 
@@ -121,6 +190,19 @@ export default function App() {
       socket.emit('message', { room, username, text: message });
       setMessage('');
     }
+  };
+
+  const watchVideo = () => {
+    setIsWatching(true);
+    setInVideoCall(false);
+    socket.emit('get-room-users', { room });
+  };
+
+  const stopWatching = () => {
+    setIsWatching(false);
+    peersRef.current.forEach((p) => p.peer.destroy());
+    peersRef.current = [];
+    setPeers([]);
   };
 
   const handleFileUpload = async (e) => {
@@ -145,9 +227,8 @@ export default function App() {
       const localStream = await navigator.mediaDevices.getUserMedia(constraints);
       setStream(localStream);
       setInVideoCall(true);
-      
-      // Notify other users in the room to initialize their WebRTC peer tracking
-      socket.emit('join', { username, room }); 
+      socket.emit('stream-start', { room });
+      socket.emit('get-room-users', { room });
     } catch (err) {
       alert("Camera configuration failed. Ensure you are utilizing HTTPS or Localhost endpoints.");
       console.error(err);
@@ -163,32 +244,11 @@ export default function App() {
     setPeers([]);
     setStream(null);
     setInVideoCall(false);
+    socket.emit('stream-stop', { room });
     socket.emit('signal', { room, signal: 'disconnect' }); 
   };
 
-  const initiateCall = (targetSid, targetUsername, localStream) => {
-    const peer = new Peer({ initiator: true, trickle: false, stream: localStream });
-    peer.on('signal', (signal) => {
-      socket.emit('signal', { target: targetSid, username, signal });
-    });
-    const peerObj = { peerID: targetSid, username: targetUsername, peer };
-    peersRef.current.push(peerObj);
-    setPeers(prev => [...prev, peerObj]);
-  };
-
-  const acceptCall = (senderSid, incomingSignal, localStream) => {
-    const peer = new Peer({ initiator: false, trickle: false, stream: localStream });
-    peer.on('signal', (signal) => {
-      socket.emit('signal', { target: senderSid, username, signal });
-    });
-    peer.signal(incomingSignal);
-    return peer;
-  };
-
-  const removeRemoteVideo = (sid) => {
-    peersRef.current = peersRef.current.filter(p => p.peerID !== sid);
-    setPeers(prev => prev.filter(p => p.peerID !== sid));
-  };
+  const activeStreamers = roomUsers.filter((u) => u.streaming);
 
   if (!isLoggedIn) {
     return (
@@ -244,9 +304,20 @@ export default function App() {
           </div>
           
           {!inVideoCall ? (
-            <button onClick={startVideo} style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}>
-              <Video size={14} /> Video Call
-            </button>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button onClick={startVideo} style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#4f46e5', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}>
+                <Video size={14} /> Video Call
+              </button>
+              {!isWatching ? (
+                <button onClick={watchVideo} style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#0f172a', color: 'white', border: '1px solid #4f46e5', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}>
+                  Watch Video
+                </button>
+              ) : (
+                <button onClick={stopWatching} style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#ef4444', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}>
+                  Stop Watching
+                </button>
+              )}
+            </div>
           ) : (
             <button onClick={endVideoCall} style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#ef4444', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}>
               <PhoneOff size={14} /> Hang Up
@@ -255,17 +326,31 @@ export default function App() {
         </div>
 
         {/* Video Dock Panel */}
-        {inVideoCall && (
-          <div style={{ backgroundColor: '#0f172a', padding: '10px', display: 'flex', gap: '12px', overflowX: 'auto', borderBottom: '1px solid #1e293b', alignItems: 'center', flexShrink: 0 }}>
-            <div style={{ position: 'relative', width: '120px', height: '90px', flexShrink: 0 }}>
-              <video ref={myVideoRef} autoPlay muted playsInline style={{ width: '120px', height: '90px', backgroundColor: 'black', borderRadius: '8px', transform: 'scaleX(-1)', objectFit: 'cover' }} />
-              <span style={{ position: 'absolute', bottom: '4px', left: '4px', backgroundColor: 'rgba(0,0,0,0.6)', padding: '2px 4px', borderRadius: '4px', fontSize: '10px' }}>You</span>
-            </div>
+        {(inVideoCall || isWatching || peers.length > 0) && (
+          <div style={{ backgroundColor: '#0f172a', padding: '10px', display: 'flex', flexWrap: 'wrap', gap: '12px', overflowY: 'auto', borderBottom: '1px solid #1e293b', alignItems: 'flex-start', flexShrink: 0, minHeight: '110px' }}>
+            {inVideoCall && (
+              <div style={{ position: 'relative', width: '120px', height: '90px', flexShrink: 0 }}>
+                <video ref={myVideoRef} autoPlay muted playsInline style={{ width: '120px', height: '90px', backgroundColor: 'black', borderRadius: '8px', transform: 'scaleX(-1)', objectFit: 'cover' }} />
+                <span style={{ position: 'absolute', bottom: '4px', left: '4px', backgroundColor: 'rgba(0,0,0,0.6)', padding: '2px 4px', borderRadius: '4px', fontSize: '10px' }}>You</span>
+              </div>
+            )}
             
-            {/* Maps out all other active users streaming video */}
-            {peers.map((peerObj) => (
-              <RemoteVideo key={peerObj.peerID} peerObj={peerObj} />
-            ))}
+            {peers.length > 0 ? (
+              peers.map((peerObj) => (
+                <RemoteVideo key={peerObj.peerID} peerObj={peerObj} />
+              ))
+            ) : (
+              <div style={{ color: '#94a3b8', fontSize: '13px', lineHeight: '1.4' }}>
+                {isWatching
+                  ? 'Watching for active video call participants...'
+                  : 'Waiting for others to join the video call...'}
+              </div>
+            )}
+          </div>
+        )}
+        {!inVideoCall && activeStreamers.length > 0 && !isWatching && (
+          <div style={{ padding: '10px 16px', color: '#c7d2fe', fontSize: '13px', backgroundColor: '#111827', borderTop: '1px solid #1e293b' }}>
+            {activeStreamers.length} user{activeStreamers.length > 1 ? 's' : ''} currently sharing video. Click Watch Video to join them.
           </div>
         )}
 

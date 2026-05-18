@@ -28,7 +28,7 @@ def handle_join(data):
     room = data.get('room', 'Global')
     
     request_sid = request.sid
-    users[request_sid] = {'username': username, 'room': room}
+    users[request_sid] = {'username': username, 'room': room, 'streaming': False}
     
     join_room(room)
     print(f"{username} joined room: {room}")
@@ -36,6 +36,50 @@ def handle_join(data):
     # Broadcast to the room that a user entered
     emit('message', {'user': 'System', 'text': f"{username} has entered the room."}, to=room)
     emit('user-joined', {'sid': request_sid, 'username': username}, to=room, include_self=False)
+
+
+@socketio.on('get-room-users')
+def handle_get_room_users(data):
+    room = data.get('room', 'Global')
+    request_sid = request.sid
+    # Collect list of users in the requested room (exclude requester)
+    room_users = []
+    for sid, info in users.items():
+        if info.get('room') == room and sid != request_sid:
+            room_users.append({
+                'sid': sid,
+                'username': info.get('username'),
+                'streaming': info.get('streaming', False)
+            })
+
+    # Send back the list only to the requester
+    emit('room-users', {'users': room_users}, to=request_sid)
+
+@socketio.on('stream-start')
+def handle_stream_start(data):
+    request_sid = request.sid
+    room = data.get('room')
+    if request_sid in users:
+        users[request_sid]['streaming'] = True
+        emit('stream-status', {
+            'sid': request_sid,
+            'username': users[request_sid]['username'],
+            'streaming': True
+        }, to=room, include_self=False)
+
+
+@socketio.on('stream-stop')
+def handle_stream_stop(data):
+    request_sid = request.sid
+    room = data.get('room')
+    if request_sid in users:
+        users[request_sid]['streaming'] = False
+        emit('stream-status', {
+            'sid': request_sid,
+            'username': users[request_sid]['username'],
+            'streaming': False
+        }, to=room, include_self=False)
+
 
 @socketio.on('message')
 def handle_message(data):
@@ -85,8 +129,11 @@ def handle_disconnect():
         user_info = users[request_sid]
         room = user_info['room']
         username = user_info['username']
+        streaming = user_info.get('streaming', False)
         
         leave_room(room)
+        if streaming:
+            emit('stream-status', {'sid': request_sid, 'username': username, 'streaming': False}, to=room, include_self=False)
         emit('message', {'user': 'System', 'text': f"{username} has disconnected."}, to=room)
         emit('user-left', {'sid': request_sid}, to=room)
         del users[request_sid]
