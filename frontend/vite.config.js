@@ -6,7 +6,9 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      events: 'events'
+      util: 'util/',
+      buffer: 'buffer/',
+      events: 'events/'
     }
   }
 })
