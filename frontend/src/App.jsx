@@ -4,7 +4,7 @@ import Peer from 'simple-peer';
 import { MessageSquare, Video, File, Send, Users, PhoneOff, Menu } from 'lucide-react';
 
 // 1. CHANGE THIS: Put your laptop's local IP (if testing locally) or your Render production URL here.
-const BACKEND_URL = "http://127.0.0.1:5000"; 
+const BACKEND_URL = "https://soulseek-app.onrender.com/"; 
 const socket = io(BACKEND_URL, { autoConnect: false, reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 5000, reconnectionAttempts: 5 });
 
 function RemoteVideo({ peerObj }) {
