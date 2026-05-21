@@ -15,6 +15,9 @@ export default function App() {
   // Video calling states
   const [inVideoCall, setInVideoCall] = useState(false);
   const [stream, setStream] = useState(null);
+  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [callInProgress, setCallInProgress] = useState(null);
   const peersRef = useRef([]); // Tracks active WebRTC peers
   
   const myVideoRef = useRef();
@@ -30,11 +33,17 @@ export default function App() {
       setMessages((prev) => [...prev, msg]);
     });
 
+    socket.on('user-list', ({ users }) => {
+      setOnlineUsers(users.filter(u => u.username !== username)); // Filter out self
+    });
+
     socket.on('user-joined', ({ sid, username: joinedUser }) => {
-      console.log(`${joinedUser} joined, setting up WebRTC handshake...`);
-      if (stream) {
-        initiateCall(sid, stream);
-      }
+      console.log(`${joinedUser} joined the room`);
+      setOnlineUsers((prev) => [...prev, { sid, username: joinedUser }].filter(u => u.username !== username));
+    });
+
+    socket.on('user-left', ({ username: leftUser }) => {
+      setOnlineUsers((prev) => prev.filter(u => u.username !== leftUser));
     });
 
     socket.on('signal', ({ sender, signal }) => {
@@ -50,11 +59,13 @@ export default function App() {
 
     return () => {
       socket.off('message');
+      socket.off('user-list');
       socket.off('user-joined');
+      socket.off('user-left');
       socket.off('signal');
       socket.disconnect();
     };
-  }, [isLoggedIn, room, stream]);
+  }, [isLoggedIn, room, stream, username]);
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -94,6 +105,31 @@ export default function App() {
       if (myVideoRef.current) myVideoRef.current.srcObject = localStream;
     } catch (err) {
       console.error("Failed to access media devices.", err);
+    }
+  };
+
+  const callUser = (userToCall) => {
+    if (!stream) {
+      alert('Please start video first');
+      return;
+    }
+    setSelectedUser(userToCall.sid);
+    setCallInProgress(userToCall.username);
+    initiateCall(userToCall.sid, stream);
+  };
+
+  const stopVideo = () => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+    setStream(null);
+    setInVideoCall(false);
+    setSelectedUser(null);
+    setCallInProgress(null);
+    peersRef.current.forEach(({ peer }) => peer.destroy());
+    peersRef.current = [];
+    if (remoteVideoContainerRef.current) {
+      remoteVideoContainerRef.current.innerHTML = '';
     }
   };
 
@@ -154,7 +190,7 @@ export default function App() {
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 font-sans">
       {/* Sidebar - Rooms Area */}
-      <div className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between p-4">
+      <div className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col p-4 gap-6">
         <div>
           <h1 className="text-xl font-black text-indigo-400 mb-6 flex items-center gap-2">🕹️ SoulSeekV2</h1>
           <div className="space-y-1">
@@ -162,6 +198,38 @@ export default function App() {
             <button className="w-full text-left bg-slate-800 px-3 py-2 rounded font-medium flex items-center gap-2"><Users size={16}/> #{room}</button>
           </div>
         </div>
+
+        {/* Online Users List */}
+        <div className="flex-1">
+          <div className="text-xs font-bold text-slate-500 uppercase px-2 mb-3">Online Users ({onlineUsers.length})</div>
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {onlineUsers.length === 0 ? (
+              <p className="text-xs text-slate-500 px-2">No other users online</p>
+            ) : (
+              onlineUsers.map((user) => (
+                <button
+                  key={user.sid}
+                  onClick={() => callUser(user)}
+                  disabled={!inVideoCall}
+                  className={`w-full text-left px-3 py-2 rounded text-sm transition flex items-center justify-between ${
+                    selectedUser === user.sid
+                      ? 'bg-emerald-600/30 border border-emerald-500 text-emerald-300'
+                      : inVideoCall
+                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                      : 'bg-slate-800/50 text-slate-400 cursor-not-allowed'
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                    {user.username}
+                  </span>
+                  {selectedUser === user.sid && <Video size={14} />}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
         <div className="p-2 bg-slate-950 rounded border border-slate-800 text-sm">
           Logged in as: <span className="font-bold text-indigo-400">{username}</span>
         </div>
@@ -172,9 +240,22 @@ export default function App() {
         {/* Top Navbar */}
         <div className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6">
           <div className="font-semibold text-lg">#{room} Lounge</div>
-          <button onClick={startVideo} className={`flex items-center gap-2 px-4 py-2 rounded text-sm font-medium transition ${inVideoCall ? 'bg-emerald-600' : 'bg-indigo-600 hover:bg-indigo-500'}`}>
-            <Video size={16} /> {inVideoCall ? 'Video Active' : 'Start Video Call'}
-          </button>
+          <div className="flex items-center gap-3">
+            {callInProgress && (
+              <div className="text-sm bg-emerald-600/20 border border-emerald-600 px-3 py-1 rounded text-emerald-300">
+                Calling {callInProgress}...
+              </div>
+            )}
+            {!inVideoCall ? (
+              <button onClick={startVideo} className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium bg-indigo-600 hover:bg-indigo-500 transition">
+                <Video size={16} /> Watch Video
+              </button>
+            ) : (
+              <button onClick={stopVideo} className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium bg-red-600 hover:bg-red-500 transition">
+                <Video size={16} /> Stop Video
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Video Streams Container */}
